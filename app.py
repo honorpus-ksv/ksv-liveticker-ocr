@@ -29,11 +29,7 @@ CACHE_LOCK = threading.Lock()
 CACHE_DATA = None
 CACHE_UPDATED = None
 OCR_RUNNING = False
-LAST_OCR_ERROR = None
-LAST_OCR_SECONDS = None
 CACHE_MAX_AGE = 5
-LAST_OCR_ATTEMPT = None
-RETRY_AFTER_ERROR = 15
 
 def compact_data(d):
     d = dict(d)
@@ -43,27 +39,19 @@ def compact_data(d):
     return d
 
 def refresh_cache():
-    global CACHE_DATA, CACHE_UPDATED, OCR_RUNNING, LAST_OCR_ERROR, LAST_OCR_SECONDS, LAST_OCR_ATTEMPT
+    global CACHE_DATA, CACHE_UPDATED, OCR_RUNNING
     with CACHE_LOCK:
         if OCR_RUNNING:
             return
         OCR_RUNNING = True
-        LAST_OCR_ATTEMPT = int(time.time())
-    started = time.monotonic()
     try:
         data = build()
-        elapsed = round(time.monotonic() - started, 2)
         with CACHE_LOCK:
             CACHE_UPDATED = int(time.time())
             CACHE_DATA = data
-            LAST_OCR_ERROR = None
-            LAST_OCR_SECONDS = elapsed
     except Exception as e:
-        elapsed = round(time.monotonic() - started, 2)
-        with CACHE_LOCK:
-            LAST_OCR_ERROR = str(e)
-            LAST_OCR_SECONDS = elapsed
-        # Letzten gültigen Spielstand behalten.
+        # Keep the last valid score instead of replacing it with an error.
+        pass
     finally:
         with CACHE_LOCK:
             OCR_RUNNING = False
@@ -73,20 +61,14 @@ def ensure_refresh():
     with CACHE_LOCK:
         stale = CACHE_UPDATED is None or (now - CACHE_UPDATED) >= CACHE_MAX_AGE
         running = OCR_RUNNING
-        last_attempt = LAST_OCR_ATTEMPT
-        last_error = LAST_OCR_ERROR
-    retry_allowed = (
-        last_attempt is None or last_error is None or
-        (now - last_attempt) >= RETRY_AFTER_ERROR
-    )
-    if stale and not running and retry_allowed:
+    if stale and not running:
         threading.Thread(target=refresh_cache, daemon=True).start()
 
 @app.route("/")
 def home():
     return jsonify({
         "service": "KSV Weissach Liveticker OCR",
-        "version": "2.9-cache-recovery",
+        "version": "3.0-fast-ocr",
         "status": "online",
         "image": "/image",
         "ocr": "/ocr",
@@ -111,15 +93,22 @@ def tesseract(img, psm=6):
     with tempfile.TemporaryDirectory() as tmp:
         fn=os.path.join(tmp,"ocr.png")
         x=img.convert("L")
-        if x.width>1600:
-            ratio=1600/x.width
-            x=x.resize((1600,max(1,int(x.height*ratio))),Image.Resampling.LANCZOS)
-        x=ImageEnhance.Contrast(x).enhance(2.0)
-        x=x.filter(ImageFilter.SHARPEN)
-        x.save(fn,"PNG",optimize=True)
+
+        # Render Free ist CPU-schwach: OCR-Bild bewusst klein halten.
+        # Die Quelle hat große Bildschirm-Schrift, daher reichen ~1000 px Breite.
+        max_width=1000
+        if x.width>max_width:
+            ratio=max_width/x.width
+            x=x.resize((max_width,max(1,int(x.height*ratio))),Image.Resampling.LANCZOS)
+
+        # Einfaches binäres Bild reduziert Tesseracts Rechenaufwand deutlich.
+        x=ImageEnhance.Contrast(x).enhance(2.2)
+        x=x.point(lambda v: 255 if v > 145 else 0)
+        x.save(fn,"PNG",optimize=False)
+
         r=subprocess.run(
-            ["tesseract",fn,"stdout","-l","deu+eng","--psm",str(psm)],
-            capture_output=True,text=True,timeout=45)
+            ["tesseract",fn,"stdout","-l","deu","--psm",str(psm)],
+            capture_output=True,text=True,timeout=25)
         if r.returncode:
             raise RuntimeError(r.stderr.strip() or "Tesseract failed")
         return r.stdout
@@ -131,10 +120,7 @@ def read_scoreboard():
         Path(fn).write_bytes(data)
         img=Image.open(fn).convert("RGB")
         raw=tesseract(img,6)
-        # Kein zweiter Tesseract-Lauf mehr. Der untere Bereich ist bereits
-        # Bestandteil von raw; parse_bottom() filtert daraus die Zahlen.
-        bottom=raw
-        return raw,bottom
+        return raw,raw
 
 def clean(s):
     s=s.replace("\u2014","-").replace("\u2013","-")
@@ -319,8 +305,6 @@ def live():
         cached = CACHE_DATA
         updated = CACHE_UPDATED
         running = OCR_RUNNING
-        last_error = LAST_OCR_ERROR
-        last_seconds = LAST_OCR_SECONDS
 
     if cached is None:
         # First request after a Render cold start: start OCR and return quickly.
@@ -328,8 +312,6 @@ def live():
             "success": False,
             "warming_up": True,
             "ocr_running": running,
-            "ocr_seconds": last_seconds,
-            "ocr_error": last_error,
             "error": "OCR wird initialisiert. Bitte in wenigen Sekunden erneut abrufen."
         }), 202
 
@@ -339,8 +321,6 @@ def live():
     d["cache_updated"] = updated
     d["ocr_running"] = running
     d["cache_age_seconds"] = max(0, int(time.time()) - updated) if updated else None
-    d["ocr_seconds"] = last_seconds
-    d["ocr_error"] = last_error
     return jsonify(d)
 
 
