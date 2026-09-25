@@ -68,7 +68,7 @@ def ensure_refresh():
 def home():
     return jsonify({
         "service": "KSV Weissach Liveticker OCR",
-        "version": "2.1-teamnames",
+        "version": "2.2-header-ocr",
         "status": "online",
         "image": "/image",
         "ocr": "/ocr",
@@ -114,8 +114,10 @@ def read_scoreboard():
         img=Image.open(fn).convert("RGB")
         raw=tesseract(img,6)
         h=img.height
+        # Dedicated OCR passes: team names are at the very top, results at the bottom.
+        header=tesseract(img.crop((0,0,img.width,int(h*.18))),6)
         bottom=tesseract(img.crop((0,int(h*.70),img.width,h)),6)
-        return raw,bottom
+        return raw,bottom,header
 
 def clean(s):
     s=s.replace("\u2014","-").replace("\u2013","-")
@@ -150,19 +152,39 @@ def parse_player_line(line):
     right=make_player(middle,ms[1])
     return left,right
 
-def team_names(raw):
-    lines = [re.sub(r"\\s+", " ", x).strip() for x in (raw or "").splitlines() if x.strip()]
-    for line in lines[:15]:
-        low = line.lower()
-        if any(k in low for k in ("satz 1", "total", "sap", "ergebnis", "wurf", "punkte", "name")):
-            continue
-        # Typical header OCR: "@ KSV Weissach 1 @ HKO Young Stars"
-        parts = [p.strip(" @|:-") for p in re.split(r"\\s*[@|]\\s*|\\s{3,}", line)
-                 if p.strip(" @|:-")]
-        parts = [p for p in parts if len(p) >= 3 and re.search(r"[A-Za-zÄÖÜäöüß]", p)]
-        if len(parts) >= 2:
-            return parts[0], parts[-1]
-    return "Heimmannschaft", "Gastmannschaft"
+def team_names(header, raw=""):
+    """Extract both team names dynamically; never hardcode a club/opponent."""
+    def candidates(text):
+        out=[]
+        for line in (text or "").splitlines():
+            line=clean(line).strip()
+            if not line:
+                continue
+            low=line.lower()
+            # Ignore table headings / score labels.
+            if any(x in low for x in ("name","satz","total","sap","wurf","ergebnis","punkte","ersatz")):
+                continue
+            # Most scoreboard headers separate the two names with @ or |.
+            parts=[clean(p).strip(" @|:-") for p in re.split(r"\\s*[@|]\\s*|\\s{3,}",line)]
+            parts=[p for p in parts if len(p)>=2 and re.search(r"[A-Za-zÄÖÜäöüß]",p)]
+            if len(parts)>=2:
+                return parts[0],parts[-1]
+            out.append(line.strip(" @|:-"))
+        return None,out
+
+    pair, lines=candidates(header)
+    if pair:
+        return pair
+    pair2, rawlines=candidates(raw)
+    if pair2:
+        return pair2
+
+    # Header can be OCR'd as two separate lines/columns.
+    usable=[x for x in lines if len(x)>=3]
+    if len(usable)>=2:
+        return usable[0],usable[1]
+    return "Heimmannschaft","Gastmannschaft"
+
 
 def parse_players(raw):
     home=[]; away=[]
@@ -219,8 +241,8 @@ def parse_bottom(text):
     return out
 
 def build():
-    raw,bottom_raw=read_scoreboard()
-    ht,at=team_names(raw)
+    raw,bottom_raw,header_raw=read_scoreboard()
+    ht,at=team_names(header_raw,raw)
     hp,ap=parse_players(raw)
     b=parse_bottom(bottom_raw)
     markers=replacement_markers(raw)
@@ -246,7 +268,8 @@ def build():
         "replacement_detected":bool(markers),
         "replacement_lines":markers,
         "raw":raw,
-        "bottom_raw":bottom_raw
+        "bottom_raw":bottom_raw,
+        "header_raw":header_raw
     }
 
 @app.route("/ocr")
