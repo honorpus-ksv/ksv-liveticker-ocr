@@ -10,6 +10,7 @@ SOURCE_URL = "http://ksv-weissach.host4free.de/Kegelbahn/Index.png"
 def home():
     return jsonify({
         "service": "KSV Weissach Liveticker OCR",
+        "version": "1.8-dynamic",
         "status": "online",
         "image": "/image",
         "ocr": "/ocr",
@@ -92,18 +93,18 @@ def parse_player_line(line):
     return left,right
 
 def team_names(raw):
-    home="KSV Weissach 1"
-    away="HKO Young Stars"
+    home="Heimmannschaft"
+    away="Gastmannschaft"
     lines=[clean(x) for x in raw.splitlines() if clean(x)]
     if lines:
         top=lines[0]
         top=re.sub(r"(?i)^[@\s]*sv\s+weissach","KSV Weissach",top)
         top=re.sub(r"(?i)h?o\s+youg\s+stars","HKO Young Stars",top)
         top=re.sub(r"(?i)hko\s+youg\s+stars","HKO Young Stars",top)
-        m=re.search(r"(KSV\s+Weissach\s*\d*)\s+[@| ]+\s*(HKO\s+Young\s+Stars)",top,re.I)
+        m=re.match(r"^\s*[@|]?\s*(.+?)\s+[@|]\s+(.+?)\s*$",top)
         if m:
-            home=clean(m.group(1))
-            away=clean(m.group(2))
+            home=clean(m.group(1)).strip(" @|")
+            away=clean(m.group(2)).strip(" @|")
     return home,away
 
 def parse_players(raw):
@@ -125,8 +126,16 @@ def replacement_markers(raw):
     werden die Originalzeilen zusätzlich unverändert geliefert.
     """
     lines=[clean(x) for x in raw.splitlines() if clean(x)]
-    keys=("ersatz","wechsel","einwechsl","auswechsl","eingewechselt")
-    return [x for x in lines if any(k in x.lower() for k in keys)]
+    found=[]
+    for line in lines:
+        low=line.lower()
+        if any(k in low for k in ("wechsel","einwechsl","auswechsl","eingewechselt")):
+            found.append(line); continue
+        if "ersatz" in low:
+            rest=re.sub(r"(?i)\bersatz\b"," ",line)
+            rest=re.sub(r"[^A-Za-zÄÖÜäöüß0-9]+","",rest)
+            if rest: found.append(line)
+    return found
 
 def parse_bottom(text):
     c=clean(text)
@@ -135,8 +144,10 @@ def parse_bottom(text):
 
     pm=re.search(r"(\d+(?:[.,]\d)?)\s*[:\-]\s*(\d+(?:[.,]\d)?)",c)
     if pm:
-        out["home_points"]=float(pm.group(1).replace(",","."))
-        out["away_points"]=float(pm.group(2).replace(",","."))
+        hp=float(pm.group(1).replace(",",".")); ap=float(pm.group(2).replace(",","."))
+        if hp > 8 and hp / 10 <= 8: hp /= 10
+        if ap > 8 and ap / 10 <= 8: ap /= 10
+        out["home_points"]=hp; out["away_points"]=ap
 
     ints=[int(x) for x in re.findall(r"(?<![\d.])(\d{3,4})(?![\d.])",c)]
     totals=[x for x in ints if 1000<=x<=9999]
