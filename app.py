@@ -29,6 +29,8 @@ CACHE_LOCK = threading.Lock()
 CACHE_DATA = None
 CACHE_UPDATED = None
 OCR_RUNNING = False
+LAST_OCR_ERROR = None
+LAST_OCR_SECONDS = None
 CACHE_MAX_AGE = 5
 
 def compact_data(d):
@@ -39,19 +41,26 @@ def compact_data(d):
     return d
 
 def refresh_cache():
-    global CACHE_DATA, CACHE_UPDATED, OCR_RUNNING
+    global CACHE_DATA, CACHE_UPDATED, OCR_RUNNING, LAST_OCR_ERROR, LAST_OCR_SECONDS
     with CACHE_LOCK:
         if OCR_RUNNING:
             return
         OCR_RUNNING = True
+    started = time.monotonic()
     try:
         data = build()
+        elapsed = round(time.monotonic() - started, 2)
         with CACHE_LOCK:
             CACHE_UPDATED = int(time.time())
             CACHE_DATA = data
+            LAST_OCR_ERROR = None
+            LAST_OCR_SECONDS = elapsed
     except Exception as e:
-        # Keep the last valid score instead of replacing it with an error.
-        pass
+        elapsed = round(time.monotonic() - started, 2)
+        with CACHE_LOCK:
+            LAST_OCR_ERROR = str(e)
+            LAST_OCR_SECONDS = elapsed
+        # Letzten gültigen Spielstand behalten.
     finally:
         with CACHE_LOCK:
             OCR_RUNNING = False
@@ -68,7 +77,7 @@ def ensure_refresh():
 def home():
     return jsonify({
         "service": "KSV Weissach Liveticker OCR",
-        "version": "2.7-substitution-info",
+        "version": "2.8-fast-cache",
         "status": "online",
         "image": "/image",
         "ocr": "/ocr",
@@ -101,7 +110,7 @@ def tesseract(img, psm=6):
         x.save(fn,"PNG",optimize=True)
         r=subprocess.run(
             ["tesseract",fn,"stdout","-l","deu+eng","--psm",str(psm)],
-            capture_output=True,text=True,timeout=90)
+            capture_output=True,text=True,timeout=18)
         if r.returncode:
             raise RuntimeError(r.stderr.strip() or "Tesseract failed")
         return r.stdout
@@ -113,8 +122,9 @@ def read_scoreboard():
         Path(fn).write_bytes(data)
         img=Image.open(fn).convert("RGB")
         raw=tesseract(img,6)
-        h=img.height
-        bottom=tesseract(img.crop((0,int(h*.70),img.width,h)),6)
+        # Kein zweiter Tesseract-Lauf mehr. Der untere Bereich ist bereits
+        # Bestandteil von raw; parse_bottom() filtert daraus die Zahlen.
+        bottom=raw
         return raw,bottom
 
 def clean(s):
@@ -300,6 +310,8 @@ def live():
         cached = CACHE_DATA
         updated = CACHE_UPDATED
         running = OCR_RUNNING
+        last_error = LAST_OCR_ERROR
+        last_seconds = LAST_OCR_SECONDS
 
     if cached is None:
         # First request after a Render cold start: start OCR and return quickly.
@@ -316,6 +328,8 @@ def live():
     d["cache_updated"] = updated
     d["ocr_running"] = running
     d["cache_age_seconds"] = max(0, int(time.time()) - updated) if updated else None
+    d["ocr_seconds"] = last_seconds
+    d["ocr_error"] = last_error
     return jsonify(d)
 
 
