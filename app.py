@@ -16,30 +16,48 @@ def home():
     return jsonify({
         "service": "KSV Weissach Liveticker OCR",
         "status": "online",
-        "ocr": "/ocr",
-        "image": "/image"
+        "image": "/image",
+        "ocr": "/ocr"
     })
 
 
 @app.route("/image")
 def image():
     try:
-        r = requests.get(SOURCE_URL, timeout=15)
+        r = requests.get(
+            SOURCE_URL,
+            timeout=10,
+            headers={
+                "User-Agent": "Mozilla/5.0"
+            }
+        )
         r.raise_for_status()
 
         return Response(
             r.content,
             content_type="image/png",
-            headers={"Cache-Control": "no-store"}
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"
+            }
         )
+
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
 
 @app.route("/ocr")
 def ocr():
     try:
-        r = requests.get(SOURCE_URL, timeout=15)
+        r = requests.get(
+            SOURCE_URL,
+            timeout=10,
+            headers={
+                "User-Agent": "Mozilla/5.0"
+            }
+        )
         r.raise_for_status()
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -51,53 +69,28 @@ def ocr():
 
             img = Image.open(source).convert("L")
 
+            # Schwarze Bereiche ober- und unterhalb der
+            # eigentlichen Anzeigetafel entfernen
+            bbox = img.getbbox()
+
+            if bbox:
+                img = img.crop(bbox)
+
+            # Für OCR nicht unnötig riesig verarbeiten
+            max_width = 1200
+
+            if img.width > max_width:
+                ratio = max_width / img.width
+                img = img.resize(
+                    (
+                        max_width,
+                        int(img.height * ratio)
+                    ),
+                    Image.Resampling.LANCZOS
+                )
+
+            # Kontrast verbessern
             img = ImageEnhance.Contrast(img).enhance(2.0)
-            img = img.filter(ImageFilter.SHARPEN)
 
-            img.save(processed)
-
-            result = subprocess.run(
-                [
-                    "tesseract",
-                    processed,
-                    "stdout",
-                    "-l",
-                    "deu+eng",
-                    "--psm",
-                    "6"
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-
-            text = result.stdout.strip()
-
-            lines = [
-                re.sub(r"\s+", " ", line).strip()
-                for line in text.splitlines()
-                if line.strip()
-            ]
-
-            return jsonify({
-                "success": True,
-                "source": SOURCE_URL,
-                "lines": lines,
-                "raw": text
-            })
-
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-
-@app.route("/health")
-def health():
-    return jsonify({"status": "ok"})
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+            # leicht schärfen
+            img = img
