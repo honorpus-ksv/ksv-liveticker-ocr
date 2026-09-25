@@ -1,16 +1,34 @@
-from flask import Flask, jsonify, Response
+from flask import Flask, jsonify, Response, request
 import requests, subprocess, tempfile, os, re
 from PIL import Image, ImageEnhance, ImageFilter
 from pathlib import Path
 
 app = Flask(__name__)
+
+@app.after_request
+def add_cors_headers(response):
+    origin = request.headers.get("Origin", "")
+    allowed = {
+        "https://test.ksv-info.de",
+        "http://test.ksv-info.de",
+        "https://ksv-info.de",
+        "https://www.ksv-info.de"
+    }
+    if origin in allowed:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+    response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return response
+
 SOURCE_URL = "http://ksv-weissach.host4free.de/Kegelbahn/Index.png"
 
 @app.route("/")
 def home():
     return jsonify({
         "service": "KSV Weissach Liveticker OCR",
-        "version": "1.8-dynamic",
+        "version": "1.9-cors",
         "status": "online",
         "image": "/image",
         "ocr": "/ocr",
