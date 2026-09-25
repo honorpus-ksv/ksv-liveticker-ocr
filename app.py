@@ -68,7 +68,7 @@ def ensure_refresh():
 def home():
     return jsonify({
         "service": "KSV Weissach Liveticker OCR",
-        "version": "2.3-teamnames-fixed",
+        "version": "2.2-robust-ocr",
         "status": "online",
         "image": "/image",
         "ocr": "/ocr",
@@ -114,10 +114,8 @@ def read_scoreboard():
         img=Image.open(fn).convert("RGB")
         raw=tesseract(img,6)
         h=img.height
-        # Dedicated OCR passes: team names are at the very top, results at the bottom.
-        header=tesseract(img.crop((0,0,img.width,int(h*.18))),6)
         bottom=tesseract(img.crop((0,int(h*.70),img.width,h)),6)
-        return raw,bottom,header
+        return raw,bottom
 
 def clean(s):
     s=s.replace("\u2014","-").replace("\u2013","-")
@@ -128,7 +126,7 @@ PLAYER_RE=re.compile(
 )
 
 def make_player(name,m):
-    name=clean(name).strip(" -|@}9")
+    name=normalize_ocr_name(name).strip(" -|@}9")
     name=re.sub(r"^[^A-Za-zÄÖÜäöüß]+","",name).strip()
     if len(name)<2:
         return None
@@ -152,36 +150,40 @@ def parse_player_line(line):
     right=make_player(middle,ms[1])
     return left,right
 
-def team_names(header, raw=""):
-    """Extract both team names dynamically from the scoreboard header."""
-    text=(header or "").strip()
-    if not text:
-        return "Heimmannschaft","Gastmannschaft"
 
-    # The scoreboard uses a symbol between/around the club names.
-    # OCR may read that symbol as ©, @, |, ® etc.
-    for line in text.splitlines():
-        line=clean(line).strip()
-        if not line:
+def normalize_ocr_name(name):
+    name = clean(name)
+    # Remove common OCR border/symbol noise without changing real words.
+    name = re.sub(r"^[©@|{}\[\]<>:;.,_\-]+\s*", "", name)
+    name = re.sub(r"\s*[©@|{}\[\]<>:;.,_\-]+$", "", name)
+    name = re.sub(r"\s{2,}", " ", name).strip()
+    return name
+
+def choose_best_name(candidates):
+    """Prefer the cleanest repeated OCR reading, without a roster dictionary."""
+    vals = [normalize_ocr_name(x) for x in candidates if normalize_ocr_name(x)]
+    if not vals:
+        return ""
+    # Prefer readings with letters, normal spacing and fewer suspicious symbols.
+    def score(x):
+        letters = len(re.findall(r"[A-Za-zÄÖÜäöüß]", x))
+        noise = len(re.findall(r"[^A-Za-zÄÖÜäöüß0-9 .&+\-/]", x))
+        return letters * 3 - noise * 8 - abs(len(x) - 18) * .05
+    return max(vals, key=score)
+
+def team_names(raw):
+    lines = [re.sub(r"\\s+", " ", x).strip() for x in (raw or "").splitlines() if x.strip()]
+    for line in lines[:15]:
+        low = line.lower()
+        if any(k in low for k in ("satz 1", "total", "sap", "ergebnis", "wurf", "punkte", "name")):
             continue
-
-        # Normalize OCR variants of the visual separator.
-        normalized=re.sub(r"[©®@|]", "§", line)
-        parts=[clean(p).strip(" §:-") for p in normalized.split("§")]
-        parts=[p for p in parts if len(p)>=2 and re.search(r"[A-Za-zÄÖÜäöüß]",p)]
-        if len(parts)>=2:
-            return parts[0],parts[-1]
-
-    # Fallback: try the full OCR text too.
-    for line in (raw or "").splitlines()[:10]:
-        normalized=re.sub(r"[©®@|]", "§", clean(line))
-        parts=[clean(p).strip(" §:-") for p in normalized.split("§")]
-        parts=[p for p in parts if len(p)>=2 and re.search(r"[A-Za-zÄÖÜäöüß]",p)]
-        if len(parts)>=2:
-            return parts[0],parts[-1]
-
-    return "Heimmannschaft","Gastmannschaft"
-
+        # Typical header OCR: "@ KSV Weissach 1 @ HKO Young Stars"
+        parts = [p.strip(" @|:-") for p in re.split(r"\\s*[@|]\\s*|\\s{3,}", line)
+                 if p.strip(" @|:-")]
+        parts = [p for p in parts if len(p) >= 3 and re.search(r"[A-Za-zÄÖÜäöüß]", p)]
+        if len(parts) >= 2:
+            return parts[0], parts[-1]
+    return "Heimmannschaft", "Gastmannschaft"
 
 def parse_players(raw):
     home=[]; away=[]
@@ -238,11 +240,19 @@ def parse_bottom(text):
     return out
 
 def build():
-    raw,bottom_raw,header_raw=read_scoreboard()
-    ht,at=team_names(header_raw,raw)
+    raw,bottom_raw=read_scoreboard()
+    ht,at=team_names(raw)
     hp,ap=parse_players(raw)
     b=parse_bottom(bottom_raw)
     markers=replacement_markers(raw)
+
+    # If an actual replacement/einwechslung line contains a player's name,
+    # mark that player. Plain empty "Ersatz" headings are ignored by replacement_markers().
+    marker_text = " ".join(markers).lower()
+    for p in hp + ap:
+        tokens = [t.lower() for t in re.findall(r"[A-Za-zÄÖÜäöüß]{3,}", p["name"])]
+        if tokens and any(t in marker_text for t in tokens):
+            p["substitute"] = True
 
     # Nur als Fallback summieren. Bei Ein-/Auswechslungen oder Ersatz
     # haben die offiziellen Gesamtwerte aus dem unteren Feld Vorrang.
@@ -265,8 +275,7 @@ def build():
         "replacement_detected":bool(markers),
         "replacement_lines":markers,
         "raw":raw,
-        "bottom_raw":bottom_raw,
-        "header_raw":header_raw
+        "bottom_raw":bottom_raw
     }
 
 @app.route("/ocr")
