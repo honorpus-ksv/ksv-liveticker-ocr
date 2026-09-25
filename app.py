@@ -68,7 +68,7 @@ def ensure_refresh():
 def home():
     return jsonify({
         "service": "KSV Weissach Liveticker OCR",
-        "version": "2.2-header-ocr",
+        "version": "2.3-teamnames-fixed",
         "status": "online",
         "image": "/image",
         "ocr": "/ocr",
@@ -153,36 +153,33 @@ def parse_player_line(line):
     return left,right
 
 def team_names(header, raw=""):
-    """Extract both team names dynamically; never hardcode a club/opponent."""
-    def candidates(text):
-        out=[]
-        for line in (text or "").splitlines():
-            line=clean(line).strip()
-            if not line:
-                continue
-            low=line.lower()
-            # Ignore table headings / score labels.
-            if any(x in low for x in ("name","satz","total","sap","wurf","ergebnis","punkte","ersatz")):
-                continue
-            # Most scoreboard headers separate the two names with @ or |.
-            parts=[clean(p).strip(" @|:-") for p in re.split(r"\\s*[@|]\\s*|\\s{3,}",line)]
-            parts=[p for p in parts if len(p)>=2 and re.search(r"[A-Za-zÄÖÜäöüß]",p)]
-            if len(parts)>=2:
-                return parts[0],parts[-1]
-            out.append(line.strip(" @|:-"))
-        return None,out
+    """Extract both team names dynamically from the scoreboard header."""
+    text=(header or "").strip()
+    if not text:
+        return "Heimmannschaft","Gastmannschaft"
 
-    pair, lines=candidates(header)
-    if pair:
-        return pair
-    pair2, rawlines=candidates(raw)
-    if pair2:
-        return pair2
+    # The scoreboard uses a symbol between/around the club names.
+    # OCR may read that symbol as ©, @, |, ® etc.
+    for line in text.splitlines():
+        line=clean(line).strip()
+        if not line:
+            continue
 
-    # Header can be OCR'd as two separate lines/columns.
-    usable=[x for x in lines if len(x)>=3]
-    if len(usable)>=2:
-        return usable[0],usable[1]
+        # Normalize OCR variants of the visual separator.
+        normalized=re.sub(r"[©®@|]", "§", line)
+        parts=[clean(p).strip(" §:-") for p in normalized.split("§")]
+        parts=[p for p in parts if len(p)>=2 and re.search(r"[A-Za-zÄÖÜäöüß]",p)]
+        if len(parts)>=2:
+            return parts[0],parts[-1]
+
+    # Fallback: try the full OCR text too.
+    for line in (raw or "").splitlines()[:10]:
+        normalized=re.sub(r"[©®@|]", "§", clean(line))
+        parts=[clean(p).strip(" §:-") for p in normalized.split("§")]
+        parts=[p for p in parts if len(p)>=2 and re.search(r"[A-Za-zÄÖÜäöüß]",p)]
+        if len(parts)>=2:
+            return parts[0],parts[-1]
+
     return "Heimmannschaft","Gastmannschaft"
 
 
