@@ -32,6 +32,8 @@ OCR_RUNNING = False
 LAST_OCR_ERROR = None
 LAST_OCR_SECONDS = None
 CACHE_MAX_AGE = 5
+LAST_OCR_ATTEMPT = None
+RETRY_AFTER_ERROR = 15
 
 def compact_data(d):
     d = dict(d)
@@ -41,11 +43,12 @@ def compact_data(d):
     return d
 
 def refresh_cache():
-    global CACHE_DATA, CACHE_UPDATED, OCR_RUNNING, LAST_OCR_ERROR, LAST_OCR_SECONDS
+    global CACHE_DATA, CACHE_UPDATED, OCR_RUNNING, LAST_OCR_ERROR, LAST_OCR_SECONDS, LAST_OCR_ATTEMPT
     with CACHE_LOCK:
         if OCR_RUNNING:
             return
         OCR_RUNNING = True
+        LAST_OCR_ATTEMPT = int(time.time())
     started = time.monotonic()
     try:
         data = build()
@@ -70,14 +73,20 @@ def ensure_refresh():
     with CACHE_LOCK:
         stale = CACHE_UPDATED is None or (now - CACHE_UPDATED) >= CACHE_MAX_AGE
         running = OCR_RUNNING
-    if stale and not running:
+        last_attempt = LAST_OCR_ATTEMPT
+        last_error = LAST_OCR_ERROR
+    retry_allowed = (
+        last_attempt is None or last_error is None or
+        (now - last_attempt) >= RETRY_AFTER_ERROR
+    )
+    if stale and not running and retry_allowed:
         threading.Thread(target=refresh_cache, daemon=True).start()
 
 @app.route("/")
 def home():
     return jsonify({
         "service": "KSV Weissach Liveticker OCR",
-        "version": "2.8-fast-cache",
+        "version": "2.9-cache-recovery",
         "status": "online",
         "image": "/image",
         "ocr": "/ocr",
@@ -110,7 +119,7 @@ def tesseract(img, psm=6):
         x.save(fn,"PNG",optimize=True)
         r=subprocess.run(
             ["tesseract",fn,"stdout","-l","deu+eng","--psm",str(psm)],
-            capture_output=True,text=True,timeout=18)
+            capture_output=True,text=True,timeout=45)
         if r.returncode:
             raise RuntimeError(r.stderr.strip() or "Tesseract failed")
         return r.stdout
@@ -319,6 +328,8 @@ def live():
             "success": False,
             "warming_up": True,
             "ocr_running": running,
+            "ocr_seconds": last_seconds,
+            "ocr_error": last_error,
             "error": "OCR wird initialisiert. Bitte in wenigen Sekunden erneut abrufen."
         }), 202
 
