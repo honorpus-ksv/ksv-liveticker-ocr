@@ -1,5 +1,5 @@
 from flask import Flask, jsonify, Response, request
-import requests, subprocess, tempfile, os, re, threading, time
+import requests, subprocess, tempfile, os, re, threading, time, hashlib
 from PIL import Image, ImageEnhance, ImageFilter
 from pathlib import Path
 
@@ -30,6 +30,8 @@ CACHE_DATA = None
 CACHE_UPDATED = None
 OCR_RUNNING = False
 CACHE_MAX_AGE = 5
+LAST_IMAGE_HASH = None
+LAST_CHECKED = None
 
 def compact_data(d):
     d = dict(d)
@@ -39,23 +41,38 @@ def compact_data(d):
     return d
 
 def refresh_cache():
-    global CACHE_DATA, CACHE_UPDATED, OCR_RUNNING
+    global CACHE_DATA, CACHE_UPDATED, OCR_RUNNING, LAST_IMAGE_HASH, LAST_CHECKED
     with CACHE_LOCK:
         if OCR_RUNNING:
             return
         OCR_RUNNING = True
     try:
-        data = build()
+        image_data = fetch_image()
+        image_hash = hashlib.sha256(image_data).hexdigest()
+        now = int(time.time())
+
         with CACHE_LOCK:
-            CACHE_UPDATED = int(time.time())
+            unchanged = CACHE_DATA is not None and LAST_IMAGE_HASH == image_hash
+            LAST_CHECKED = now
+
+        if unchanged:
+            # Bild identisch: keine OCR. Der vorhandene Spielstand bleibt gültig.
+            with CACHE_LOCK:
+                CACHE_UPDATED = now
+            return
+
+        # Nur ein tatsächlich neues Bild wird per OCR ausgewertet.
+        data = build(image_data)
+        with CACHE_LOCK:
             CACHE_DATA = data
-    except Exception as e:
-        # Keep the last valid score instead of replacing it with an error.
+            CACHE_UPDATED = int(time.time())
+            LAST_IMAGE_HASH = image_hash
+    except Exception:
+        # Letzten gültigen Spielstand behalten.
         pass
     finally:
         with CACHE_LOCK:
             OCR_RUNNING = False
-
 def ensure_refresh():
     now = int(time.time())
     with CACHE_LOCK:
@@ -68,7 +85,7 @@ def ensure_refresh():
 def home():
     return jsonify({
         "service": "KSV Weissach Liveticker OCR",
-        "version": "3.0-fast-ocr",
+        "version": "3.1-change-detection",
         "status": "online",
         "image": "/image",
         "ocr": "/ocr",
@@ -93,34 +110,30 @@ def tesseract(img, psm=6):
     with tempfile.TemporaryDirectory() as tmp:
         fn=os.path.join(tmp,"ocr.png")
         x=img.convert("L")
-
-        # Render Free ist CPU-schwach: OCR-Bild bewusst klein halten.
-        # Die Quelle hat große Bildschirm-Schrift, daher reichen ~1000 px Breite.
-        max_width=1000
-        if x.width>max_width:
-            ratio=max_width/x.width
-            x=x.resize((max_width,max(1,int(x.height*ratio))),Image.Resampling.LANCZOS)
-
-        # Einfaches binäres Bild reduziert Tesseracts Rechenaufwand deutlich.
-        x=ImageEnhance.Contrast(x).enhance(2.2)
-        x=x.point(lambda v: 255 if v > 145 else 0)
-        x.save(fn,"PNG",optimize=False)
-
+        if x.width>1600:
+            ratio=1600/x.width
+            x=x.resize((1600,max(1,int(x.height*ratio))),Image.Resampling.LANCZOS)
+        x=ImageEnhance.Contrast(x).enhance(2.0)
+        x=x.filter(ImageFilter.SHARPEN)
+        x.save(fn,"PNG",optimize=True)
         r=subprocess.run(
-            ["tesseract",fn,"stdout","-l","deu","--psm",str(psm)],
-            capture_output=True,text=True,timeout=25)
+            ["tesseract",fn,"stdout","-l","deu+eng","--psm",str(psm)],
+            capture_output=True,text=True,timeout=90)
         if r.returncode:
             raise RuntimeError(r.stderr.strip() or "Tesseract failed")
         return r.stdout
 
-def read_scoreboard():
-    data=fetch_image()
+def read_scoreboard(data=None):
+    if data is None:
+        data=fetch_image()
     with tempfile.TemporaryDirectory() as tmp:
         fn=os.path.join(tmp,"source.png")
         Path(fn).write_bytes(data)
         img=Image.open(fn).convert("RGB")
         raw=tesseract(img,6)
-        return raw,raw
+        h=img.height
+        bottom=tesseract(img.crop((0,int(h*.70),img.width,h)),6)
+        return raw,bottom
 
 def clean(s):
     s=s.replace("\u2014","-").replace("\u2013","-")
@@ -247,8 +260,8 @@ def parse_bottom(text):
         out["difference"]=out["home_total"]-out["away_total"]
     return out
 
-def build():
-    raw,bottom_raw=read_scoreboard()
+def build(image_data=None):
+    raw,bottom_raw=read_scoreboard(image_data)
     ht,at=team_names(raw)
     hp,ap=parse_players(raw)
     b=parse_bottom(bottom_raw)
@@ -321,6 +334,8 @@ def live():
     d["cache_updated"] = updated
     d["ocr_running"] = running
     d["cache_age_seconds"] = max(0, int(time.time()) - updated) if updated else None
+    d["image_checked"] = LAST_CHECKED
+    d["change_detection"] = True
     return jsonify(d)
 
 
