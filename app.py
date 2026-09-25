@@ -1,5 +1,5 @@
 from flask import Flask, jsonify, Response, request
-import requests, subprocess, tempfile, os, re
+import requests, subprocess, tempfile, os, re, threading, time
 from PIL import Image, ImageEnhance, ImageFilter
 from pathlib import Path
 
@@ -24,11 +24,51 @@ def add_cors_headers(response):
 
 SOURCE_URL = "http://ksv-weissach.host4free.de/Kegelbahn/Index.png"
 
+
+CACHE_LOCK = threading.Lock()
+CACHE_DATA = None
+CACHE_UPDATED = None
+OCR_RUNNING = False
+CACHE_MAX_AGE = 5
+
+def compact_data(d):
+    d = dict(d)
+    d.pop("raw", None)
+    d.pop("bottom_raw", None)
+    d["cache_updated"] = CACHE_UPDATED
+    return d
+
+def refresh_cache():
+    global CACHE_DATA, CACHE_UPDATED, OCR_RUNNING
+    with CACHE_LOCK:
+        if OCR_RUNNING:
+            return
+        OCR_RUNNING = True
+    try:
+        data = build()
+        with CACHE_LOCK:
+            CACHE_UPDATED = int(time.time())
+            CACHE_DATA = data
+    except Exception as e:
+        # Keep the last valid score instead of replacing it with an error.
+        pass
+    finally:
+        with CACHE_LOCK:
+            OCR_RUNNING = False
+
+def ensure_refresh():
+    now = int(time.time())
+    with CACHE_LOCK:
+        stale = CACHE_UPDATED is None or (now - CACHE_UPDATED) >= CACHE_MAX_AGE
+        running = OCR_RUNNING
+    if stale and not running:
+        threading.Thread(target=refresh_cache, daemon=True).start()
+
 @app.route("/")
 def home():
     return jsonify({
         "service": "KSV Weissach Liveticker OCR",
-        "version": "1.9-cors",
+        "version": "2.0-cache",
         "status": "online",
         "image": "/image",
         "ocr": "/ocr",
@@ -221,15 +261,37 @@ def ocr():
 
 @app.route("/live")
 def live():
-    try:
-        d=build()
-        d.pop("raw",None)
-        d.pop("bottom_raw",None)
-        return jsonify(d)
-    except subprocess.TimeoutExpired:
-        return jsonify({"success":False,"error":"OCR timeout"}),504
-    except Exception as e:
-        return jsonify({"success":False,"error":str(e)}),500
+    global CACHE_DATA
+    ensure_refresh()
+
+    with CACHE_LOCK:
+        cached = CACHE_DATA
+        updated = CACHE_UPDATED
+        running = OCR_RUNNING
+
+    if cached is None:
+        # First request after a Render cold start: start OCR and return quickly.
+        return jsonify({
+            "success": False,
+            "warming_up": True,
+            "ocr_running": running,
+            "error": "OCR wird initialisiert. Bitte in wenigen Sekunden erneut abrufen."
+        }), 202
+
+    d = dict(cached)
+    d.pop("raw", None)
+    d.pop("bottom_raw", None)
+    d["cache_updated"] = updated
+    d["ocr_running"] = running
+    d["cache_age_seconds"] = max(0, int(time.time()) - updated) if updated else None
+    return jsonify(d)
+
+
+def delayed_start():
+    time.sleep(1)
+    refresh_cache()
+
+threading.Thread(target=delayed_start, daemon=True).start()
 
 if __name__=="__main__":
     app.run(host="0.0.0.0",port=int(os.environ.get("PORT",10000)))
