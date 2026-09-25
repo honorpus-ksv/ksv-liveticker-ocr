@@ -68,7 +68,7 @@ def ensure_refresh():
 def home():
     return jsonify({
         "service": "KSV Weissach Liveticker OCR",
-        "version": "2.3-stable-teamnames",
+        "version": "2.4-restored-working",
         "status": "online",
         "image": "/image",
         "ocr": "/ocr",
@@ -150,12 +150,6 @@ def parse_player_line(line):
     right=make_player(middle,ms[1])
     return left,right
 
-def safe_name_cleanup(name):
-    name = clean(name)
-    name = re.sub(r"^[©@|{}\[\]<>:;.,_\-]+\s*", "", name)
-    name = re.sub(r"\s*[©@|{}\[\]<>:;.,_\-]+$", "", name)
-    return re.sub(r"\s{2,}", " ", name).strip()
-
 def team_names(raw):
     lines = [re.sub(r"\\s+", " ", x).strip() for x in (raw or "").splitlines() if x.strip()]
     for line in lines[:15]:
@@ -167,7 +161,7 @@ def team_names(raw):
                  if p.strip(" @|:-")]
         parts = [p for p in parts if len(p) >= 3 and re.search(r"[A-Za-zÄÖÜäöüß]", p)]
         if len(parts) >= 2:
-            return safe_name_cleanup(parts[0]), safe_name_cleanup(parts[-1])
+            return parts[0], parts[-1]
     return "Heimmannschaft", "Gastmannschaft"
 
 def parse_players(raw):
