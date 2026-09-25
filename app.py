@@ -68,7 +68,7 @@ def ensure_refresh():
 def home():
     return jsonify({
         "service": "KSV Weissach Liveticker OCR",
-        "version": "2.6-team-separator-fix",
+        "version": "2.7-substitution-info",
         "status": "online",
         "image": "/image",
         "ocr": "/ocr",
@@ -176,6 +176,30 @@ def parse_players(raw):
     # Keine feste Mannschaftsgröße mehr: bis zu 8 sichtbare Spieler je Seite.
     return home[:8],away[:8]
 
+def substitution_info(raw):
+    """
+    Zusätzliche, rein informative Wechsel-Erkennung.
+    Verändert weder Spielerlisten noch Mannschaftsnamen oder Ergebnisse.
+    """
+    lines = [clean(x) for x in (raw or "").splitlines() if clean(x)]
+    events = []
+    keywords = ("wechsel", "einwechsl", "auswechsl", "eingewechselt", "ausgewechselt")
+    for line in lines:
+        low = line.lower()
+        if any(k in low for k in keywords):
+            events.append({"type": "wechsel", "raw": line})
+        elif "ersatz" in low:
+            # Reine Tabellen-/Platzhalterzeilen wie "Ersatz Ersatz" nicht als echten Wechsel melden.
+            stripped = re.sub(r"(?i)\bersatz\b", " ", line)
+            stripped = re.sub(r"[^A-Za-zÄÖÜäöüß0-9]+", "", stripped)
+            if stripped:
+                events.append({"type": "ersatz", "raw": line})
+    return {
+        "detected": bool(events),
+        "count": len(events),
+        "events": events
+    }
+
 def replacement_markers(raw):
     """
     Erfasst alles, was OCR im Spielerfeld als Ersatz/Einwechslung erkennt.
@@ -224,6 +248,7 @@ def build():
     hp,ap=parse_players(raw)
     b=parse_bottom(bottom_raw)
     markers=replacement_markers(raw)
+    subinfo=substitution_info(raw)
 
     # Nur als Fallback summieren. Bei Ein-/Auswechslungen oder Ersatz
     # haben die offiziellen Gesamtwerte aus dem unteren Feld Vorrang.
@@ -252,6 +277,7 @@ def build():
         "players_detected":len(hp)+len(ap),
         "replacement_detected":bool(markers),
         "replacement_lines":markers,
+        "substitution_info":subinfo,
         "raw":raw,
         "bottom_raw":bottom_raw
     }
