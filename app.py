@@ -1,6 +1,7 @@
 from flask import Flask, jsonify, Response
 import requests, subprocess, tempfile, os, re
 from PIL import Image, ImageEnhance, ImageFilter
+from pathlib import Path
 
 app = Flask(__name__)
 SOURCE_URL = "http://ksv-weissach.host4free.de/Kegelbahn/Index.png"
