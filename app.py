@@ -68,7 +68,7 @@ def ensure_refresh():
 def home():
     return jsonify({
         "service": "KSV Weissach Liveticker OCR",
-        "version": "2.5-team-regex-fix",
+        "version": "2.6-team-separator-fix",
         "status": "online",
         "image": "/image",
         "ocr": "/ocr",
@@ -157,7 +157,7 @@ def team_names(raw):
         if any(k in low for k in ("satz 1", "total", "sap", "ergebnis", "wurf", "punkte", "name")):
             continue
         # Typical header OCR: "@ KSV Weissach 1 @ HKO Young Stars"
-        parts = [p.strip(" @|:-") for p in re.split(r"\s*[@|]\s*|\s{3,}", line)
+        parts = [p.strip(" @|:-") for p in re.split(r"\s*[©@|]\s*|\s{3,}", line)
                  if p.strip(" @|:-")]
         parts = [p for p in parts if len(p) >= 3 and re.search(r"[A-Za-zÄÖÜäöüß]", p)]
         if len(parts) >= 2:
@@ -234,8 +234,15 @@ def build():
     if b["home_total"] is not None and b["away_total"] is not None:
         b["difference"]=b["home_total"]-b["away_total"]
 
+    header_raw = next(
+        (clean(line) for line in raw.splitlines()
+         if "©" in line or ("KSV" in line and len(line) < 120)),
+        ""
+    )
+
     return {
         "success":True,
+        "header_raw":header_raw,
         "home":{"team":ht,"players":hp,"player_count":len(hp),
                 "throws":b["home_throws"],"total":b["home_total"]},
         "away":{"team":at,"players":ap,"player_count":len(ap),
