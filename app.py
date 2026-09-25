@@ -93,4 +93,53 @@ def ocr():
             img = ImageEnhance.Contrast(img).enhance(2.0)
 
             # leicht schärfen
-            img = img
+img = img.filter(ImageFilter.SHARPEN)
+
+# verarbeitetes Bild speichern
+img.save(processed, format="PNG")
+
+# OCR durchführen
+result = subprocess.run(
+    [
+        "tesseract",
+        processed,
+        "stdout",
+        "-l",
+        "deu+eng",
+        "--psm",
+        "6"
+    ],
+    capture_output=True,
+    text=True,
+    timeout=90
+)
+
+if result.returncode != 0:
+    return jsonify({
+        "success": False,
+        "error": result.stderr
+    }), 500
+
+text = result.stdout
+
+return jsonify({
+    "success": True,
+    "text": text
+})
+
+except subprocess.TimeoutExpired:
+    return jsonify({
+        "success": False,
+        "error": "OCR timeout"
+    }), 504
+
+except Exception as e:
+    return jsonify({
+        "success": False,
+        "error": str(e)
+    }), 500
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
