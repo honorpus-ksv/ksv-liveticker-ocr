@@ -3,6 +3,7 @@ import requests
 import subprocess
 import tempfile
 import os
+import re
 from PIL import Image, ImageEnhance, ImageFilter
 
 app = Flask(__name__)
@@ -10,15 +11,24 @@ app = Flask(__name__)
 SOURCE_URL = "http://ksv-weissach.host4free.de/Kegelbahn/Index.png"
 
 
+# ---------------------------------------------------------
+# STARTSEITE
+# ---------------------------------------------------------
+
 @app.route("/")
 def home():
     return jsonify({
         "service": "KSV Weissach Liveticker OCR",
         "status": "online",
         "image": "/image",
-        "ocr": "/ocr"
+        "ocr": "/ocr",
+        "live": "/live"
     })
 
+
+# ---------------------------------------------------------
+# ORIGINALBILD
+# ---------------------------------------------------------
 
 @app.route("/image")
 def image():
@@ -28,6 +38,7 @@ def image():
             timeout=10,
             headers={"User-Agent": "Mozilla/5.0"}
         )
+
         r.raise_for_status()
 
         return Response(
@@ -45,102 +56,127 @@ def image():
         }), 500
 
 
-@app.route("/ocr")
-def ocr():
-    try:
-        # Aktuelles Bild vom KSV-Server laden
-        r = requests.get(
-            SOURCE_URL,
-            timeout=10,
-            headers={"User-Agent": "Mozilla/5.0"}
-        )
-        r.raise_for_status()
+# ---------------------------------------------------------
+# GEMEINSAME OCR-FUNKTION
+# ---------------------------------------------------------
 
-        with tempfile.TemporaryDirectory() as tmp:
-            source = os.path.join(tmp, "source.png")
-            processed = os.path.join(tmp, "processed.png")
+def read_scoreboard():
 
-            # Originalbild speichern
-            with open(source, "wb") as f:
-                f.write(r.content)
+    r = requests.get(
+        SOURCE_URL,
+        timeout=10,
+        headers={"User-Agent": "Mozilla/5.0"}
+    )
 
-            # Bild laden und in Graustufen umwandeln
-            img = Image.open(source).convert("L")
+    r.raise_for_status()
 
-            # Leere/schwarze Außenbereiche entfernen
-            bbox = img.getbbox()
+    with tempfile.TemporaryDirectory() as tmp:
 
-            if bbox:
-                img = img.crop(bbox)
+        source = os.path.join(tmp, "source.png")
+        processed = os.path.join(tmp, "processed.png")
 
-            # Bildgröße für Render begrenzen
-            max_width = 1200
+        # Bild speichern
+        with open(source, "wb") as f:
+            f.write(r.content)
 
-            if img.width > max_width:
-                ratio = max_width / img.width
+        # Bild laden
+        img = Image.open(source).convert("L")
 
-                img = img.resize(
-                    (
-                        max_width,
-                        int(img.height * ratio)
-                    ),
-                    Image.Resampling.LANCZOS
-                )
+        # Außenbereiche entfernen
+        bbox = img.getbbox()
 
-            # Kontrast erhöhen
-            img = ImageEnhance.Contrast(img).enhance(2.0)
+        if bbox:
+            img = img.crop(bbox)
 
-            # Bild leicht schärfen
-            img = img.filter(ImageFilter.SHARPEN)
+        # Bildgröße begrenzen
+        max_width = 1200
 
-            # Für Tesseract speichern
-            img.save(processed, format="PNG")
+        if img.width > max_width:
 
-            # OCR durchführen
-            result = subprocess.run(
-                [
-                    "tesseract",
-                    processed,
-                    "stdout",
-                    "-l",
-                    "deu+eng",
-                    "--psm",
-                    "6"
-                ],
-                capture_output=True,
-                text=True,
-                timeout=90
+            ratio = max_width / img.width
+
+            img = img.resize(
+                (
+                    max_width,
+                    int(img.height * ratio)
+                ),
+                Image.Resampling.LANCZOS
             )
 
-            if result.returncode != 0:
-                return jsonify({
-                    "success": False,
-                    "error": result.stderr
-                }), 500
+        # Kontrast verbessern
+        img = ImageEnhance.Contrast(img).enhance(2.0)
 
-            text = result.stdout
+        # Schärfen
+        img = img.filter(ImageFilter.SHARPEN)
 
-            return jsonify({
-                "success": True,
-                "text": text
-            })
+        # Speichern
+        img.save(
+            processed,
+            format="PNG"
+        )
+
+        # Tesseract OCR
+        result = subprocess.run(
+            [
+                "tesseract",
+                processed,
+                "stdout",
+                "-l",
+                "deu+eng",
+                "--psm",
+                "6"
+            ],
+            capture_output=True,
+            text=True,
+            timeout=90
+        )
+
+        if result.returncode != 0:
+
+            raise RuntimeError(
+                result.stderr
+            )
+
+        return result.stdout
+
+
+# ---------------------------------------------------------
+# ROHE OCR-AUSGABE
+# ---------------------------------------------------------
+
+@app.route("/ocr")
+def ocr():
+
+    try:
+
+        text = read_scoreboard()
+
+        return jsonify({
+            "success": True,
+            "text": text
+        })
 
     except subprocess.TimeoutExpired:
+
         return jsonify({
             "success": False,
             "error": "OCR timeout"
         }), 504
 
     except Exception as e:
+
         return jsonify({
             "success": False,
             "error": str(e)
         }), 500
 
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(
-        host="0.0.0.0",
-        port=port
-    )
+# ---------------------------------------------------------
+# SPIELER AUS OCR-TEXT ERKENNEN
+# ---------------------------------------------------------
+
+def parse_players(text):
+
+    pattern = re.compile(
+        r"([A-Za-zÄÖÜäöüß\- ]+?)\s+"
+        r"(\d{2,3})\s+"
