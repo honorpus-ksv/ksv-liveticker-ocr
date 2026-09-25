@@ -68,7 +68,7 @@ def ensure_refresh():
 def home():
     return jsonify({
         "service": "KSV Weissach Liveticker OCR",
-        "version": "2.0-cache",
+        "version": "2.1-teamnames",
         "status": "online",
         "image": "/image",
         "ocr": "/ocr",
@@ -151,19 +151,18 @@ def parse_player_line(line):
     return left,right
 
 def team_names(raw):
-    home="Heimmannschaft"
-    away="Gastmannschaft"
-    lines=[clean(x) for x in raw.splitlines() if clean(x)]
-    if lines:
-        top=lines[0]
-        top=re.sub(r"(?i)^[@\s]*sv\s+weissach","KSV Weissach",top)
-        top=re.sub(r"(?i)h?o\s+youg\s+stars","HKO Young Stars",top)
-        top=re.sub(r"(?i)hko\s+youg\s+stars","HKO Young Stars",top)
-        m=re.match(r"^\s*[@|]?\s*(.+?)\s+[@|]\s+(.+?)\s*$",top)
-        if m:
-            home=clean(m.group(1)).strip(" @|")
-            away=clean(m.group(2)).strip(" @|")
-    return home,away
+    lines = [re.sub(r"\\s+", " ", x).strip() for x in (raw or "").splitlines() if x.strip()]
+    for line in lines[:15]:
+        low = line.lower()
+        if any(k in low for k in ("satz 1", "total", "sap", "ergebnis", "wurf", "punkte", "name")):
+            continue
+        # Typical header OCR: "@ KSV Weissach 1 @ HKO Young Stars"
+        parts = [p.strip(" @|:-") for p in re.split(r"\\s*[@|]\\s*|\\s{3,}", line)
+                 if p.strip(" @|:-")]
+        parts = [p for p in parts if len(p) >= 3 and re.search(r"[A-Za-zÄÖÜäöüß]", p)]
+        if len(parts) >= 2:
+            return parts[0], parts[-1]
+    return "Heimmannschaft", "Gastmannschaft"
 
 def parse_players(raw):
     home=[]; away=[]
